@@ -5,21 +5,11 @@ from datetime import datetime, timedelta
 import sys
 import os
 from google.oauth2 import service_account
-from googleapiclient.discovery import build
+from googleapiclient.discovery import build # type: ignore
 from dotenv import load_dotenv
-import logging
-from rich.console import Console
-from rich.logging import RichHandler
+from utils.logging_utils import setup_logging
 
-# Configure Rich logging
-console = Console()
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[RichHandler(console=console, rich_tracebacks=True)]
-)
-log = logging.getLogger("expense_tracker_analytics")
+log = setup_logging("expense_tracker_analytics")
 
 st.set_page_config (layout='wide')
 
@@ -69,23 +59,56 @@ def get_transactions_data():
         raise
 
 @st.cache_data(ttl=300)
-def get_pending_transactions():
+def get_pending_transactions() -> pd.DataFrame:
+    """
+    Fetch pending transactions from Google Sheet.
+    Only returns transactions with status 'Pending'.
+    """
     try:
         log.debug("Fetching pending transactions data")
         result = service.spreadsheets().values().get(
             spreadsheetId=SHEET_ID,
-            range='Pending!A1:G'  # Added status column
+            range='Pending!A1:G'  # Include status column
         ).execute()
         
         values = result.get('values', [])
         if not values:
-            log.warning("No pending transactions found")
+            log.warning("No data found in Pending sheet")
             return pd.DataFrame(columns=['Date', 'Amount', 'Type', 'Category', 'Description', 'Due Date', 'Status'])
         
-        return pd.DataFrame(values[1:], columns=['Date', 'Amount', 'Type', 'Category', 'Description', 'Due Date', 'Status'])
+        log.debug(f"Raw data from sheet: {values[:5]}")  # Log first few rows
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(values[1:], columns=['Date', 'Amount', 'Type', 'Category', 'Description', 'Due Date', 'Status'])
+        log.debug(f"Initial DataFrame shape: {df.shape}")
+        
+        # Log unique values in Status column
+        log.debug(f"Unique Status values: {df['Status'].unique()}")
+        
+        # Filter only pending transactions
+        df = df[df['Status'].str.strip().str.upper() == 'PENDING']
+        log.debug(f"DataFrame shape after status filter: {df.shape}")
+        
+        if df.empty:
+            log.warning("No pending transactions after filtering")
+            return df
+        
+        # Convert Amount to numeric
+        df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
+        
+        # Convert dates
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df['Due Date'] = pd.to_datetime(df['Due Date'], errors='coerce')
+        
+        # Drop rows with NaN values
+        df = df.dropna(subset=['Amount', 'Type', 'Status'])
+        log.debug(f"Final DataFrame shape: {df.shape}")
+        
+        log.info(f"📊 Retrieved {len(df)} pending transactions")
+        return df
     except Exception as e:
         log.error(f"❌ Failed to fetch pending transactions: {str(e)}")
-        return pd.DataFrame(columns=['Date', 'Amount', 'Type', 'Category', 'Description', 'Due Date', 'Status'])
+        raise
 
 def initialize_filters():
     """Initialize filter values in session state if they don't exist"""
@@ -463,76 +486,75 @@ def show_expense_analytics(df, start_date, end_date):
                         labels={'value': 'Growth Rate (%)', 'index': 'Month'})
     st.plotly_chart(fig_growth)
 
-def show_pending_transactions(start_date, end_date):
-    st.subheader("💰 Pending Transactions")
+def show_pending_transactions():
+    """Display pending transactions section"""
+    st.subheader("📋 Pending Transactions")
     
-    # Get pending transactions
-    df = get_pending_transactions()
-    if not df.empty:
-        df['Amount'] = pd.to_numeric(df['Amount'])
-        df['Date'] = pd.to_datetime(df['Date'])
-        df['Due Date'] = pd.to_datetime(df['Due Date'])
+    try:
+        df = get_pending_transactions()
         
-        # For "All Time", don't filter by date
-        if st.session_state.global_filter_type != "All Time":
-            df = df[(df['Due Date'] >= start_date) & (df['Due Date'] <= end_date)]
-    
-    if df.empty:
-        st.info("No pending transactions found.")
-        return
-    
-    # Display selected period if not "All Time"
-    if st.session_state.global_filter_type != "All Time":
-        st.caption(f"Showing pending transactions with due dates from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-    else:
-        st.caption("Showing all pending transactions")
-    
-    # Calculate totals
-    to_receive = df[df['Type'] == 'To Receive']['Amount'].sum()
-    to_pay = df[df['Type'] == 'To Pay']['Amount'].sum()
-    net_pending = to_receive - to_pay
-    
-    # Display metrics
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("To Receive", f"Rs. {to_receive:,.2f}", delta=None)
-    with col2:
-        st.metric("To Pay", f"Rs. {to_pay:,.2f}", delta=None)
-    with col3:
-        st.metric("Net Pending", f"Rs. {net_pending:,.2f}", 
-                 delta=f"Rs. {net_pending:,.2f}", 
-                 delta_color="normal" if net_pending >= 0 else "inverse")
-    
-    # Show pending transactions in tabs
-    tab1, tab2 = st.tabs(["To Receive", "To Pay"])
-    
-    with tab1:
-        receive_df = df[df['Type'] == 'To Receive'].sort_values('Due Date')
-        if not receive_df.empty:
-            st.dataframe(
-                receive_df[['Description', 'Amount', 'Due Date', 'Status']].style.format({
-                    'Amount': 'Rs. {:,.2f}',
-                    'Due Date': lambda x: x.strftime('%Y-%m-%d')
-                }),
-                hide_index=True,
-                use_container_width=True
-            )
-        else:
-            st.info("No pending receivables for the selected period.")
-    
-    with tab2:
-        pay_df = df[df['Type'] == 'To Pay'].sort_values('Due Date')
-        if not pay_df.empty:
-            st.dataframe(
-                pay_df[['Description', 'Amount', 'Due Date', 'Status']].style.format({
-                    'Amount': 'Rs. {:,.2f}',
-                    'Due Date': lambda x: x.strftime('%Y-%m-%d')
-                }),
-                hide_index=True,
-                use_container_width=True
-            )
-        else:
-            st.info("No pending payables for the selected period.")
+        if df.empty:
+            st.info("No pending transactions found.")
+            return
+        
+        # Create tabs for To Receive and To Pay
+        to_receive = df[df['Type'] == 'To Receive'].copy()
+        to_pay = df[df['Type'] == 'To Pay'].copy()
+        
+        # Show summary metrics first
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            total_to_receive = to_receive['Amount'].sum()
+            st.metric("To Receive", f"Rs. {total_to_receive:,.2f}")
+            
+        with col2:
+            total_to_pay = to_pay['Amount'].sum()
+            st.metric("To Pay", f"Rs. {total_to_pay:,.2f}")
+            
+        with col3:
+            net_pending = total_to_receive - total_to_pay
+            st.metric("Net Pending", 
+                     f"Rs. {net_pending:,.2f}",
+                     delta=f"Rs. {net_pending:,.2f}",
+                     delta_color="normal" if net_pending >= 0 else "inverse")
+        
+        st.divider()
+        
+        tab1, tab2 = st.tabs(["💰 To Receive", "💸 To Pay"])
+        
+        with tab1:
+            if to_receive.empty:
+                st.info("No pending receipts.")
+            else:
+                st.write("### Pending Receipts")
+                # Format amount with currency
+                to_receive['Amount'] = to_receive['Amount'].apply(lambda x: f"Rs. {x:,.2f}")
+                # Format dates
+                to_receive['Date'] = to_receive['Date'].dt.strftime('%Y-%m-%d')
+                to_receive['Due Date'] = to_receive['Due Date'].dt.strftime('%Y-%m-%d')
+                st.dataframe(
+                    to_receive[['Date', 'Amount', 'Category', 'Description', 'Due Date']],
+                    use_container_width=True
+                )
+        
+        with tab2:
+            if to_pay.empty:
+                st.info("No pending payments.")
+            else:
+                st.write("### Pending Payments")
+                # Format amount with currency
+                to_pay['Amount'] = to_pay['Amount'].apply(lambda x: f"Rs. {x:,.2f}")
+                # Format dates
+                to_pay['Date'] = to_pay['Date'].dt.strftime('%Y-%m-%d')
+                to_pay['Due Date'] = to_pay['Due Date'].dt.strftime('%Y-%m-%d')
+                st.dataframe(
+                    to_pay[['Date', 'Amount', 'Category', 'Description', 'Due Date']],
+                    use_container_width=True
+                )
+    except Exception as e:
+        log.error(f"Error displaying pending transactions: {str(e)}")
+        st.error("Failed to load pending transactions. Please check the logs for details.")
 
 def show_analytics():
     try:
@@ -571,7 +593,7 @@ def show_analytics():
         with tab3:
             show_expense_analytics(filtered_df, start_date, end_date)
         with tab4:
-            show_pending_transactions(start_date, end_date)
+            show_pending_transactions()
         
         log.info("📊 Analytics visualizations generated successfully")
     except Exception as e:

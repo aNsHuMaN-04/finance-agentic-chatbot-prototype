@@ -1,0 +1,15 @@
+{
+    "python.analysis.inlayHints.functionReturnTypes": true,
+    "python.analysis.inlayHints.pytestParameters": true,
+    "python.analysis.inlayHints.variableTypes": true,
+    "python.analysis.regenerateStdLibIndices": true,
+    "python.REPL.sendToNativeREPL": true,
+    "python.analysis.typeCheckingMode": "strict",
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "notebook.defaultFormatter": "charliermarsh.ruff",
+    "autoDocstring.docstringFormat": "numpy",
+    "autoDocstring.includeExtendedSummary": true,
+    "autoDocstring.includeName": true,
+    "autoDocstring.logLevel": "Debug",
+    "autoDocstring.startOnNewLine": true
+}

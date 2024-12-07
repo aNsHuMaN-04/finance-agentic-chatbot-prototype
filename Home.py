@@ -1,30 +1,20 @@
+from logging import Logger
+from typing import Any
 import streamlit as st
 import pandas as pd
 import google.generativeai as genai
-from googleapiclient.discovery import build
-from google.oauth2 import service_account
 import plotly.express as px
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
-from rich.console import Console
-from rich.logging import RichHandler
-import logging
 import sys
 from dateutil import parser
 import re
 from config.constants import TRANSACTION_TYPES, CATEGORIES
-# from services.google_sheets import get_sheets_service
+from services.google_sheets import get_sheets_service
+from utils.logging_utils import setup_logging
 
-# Configure Rich logging
-console = Console()
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[RichHandler(console=console, rich_tracebacks=True)]
-)
-log = logging.getLogger("expense_tracker")
+log: Logger = setup_logging("expense_tracker")
 
 # Load environment variables
 load_dotenv()
@@ -34,56 +24,46 @@ st.set_page_config (layout='wide')
 
 # Configure Gemini AI
 @st.cache_resource
-def get_gemini_model():
+def get_gemini_model() -> Any:
     """Cache Gemini AI configuration"""
     try:
-        genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-        model = genai.GenerativeModel('gemini-pro')
+        genai.configure(api_key=os.getenv('GEMINI_API_KEY')) # type: ignore
+        model: Any = genai.GenerativeModel('gemini-1.5-flash') # type: ignore
         log.info("🤖 Gemini AI configured successfully")
         return model
     except Exception as e:
         log.error(f"❌ Failed to configure Gemini AI: {str(e)}")
         raise
 
-# Google Sheets setup
-@st.cache_resource
-def get_sheets_service():
-    """Cache Google Sheets service configuration"""
-    try:
-        creds = service_account.Credentials.from_service_account_file(
-            os.getenv('GOOGLE_SHEETS_CREDENTIALS'), 
-            scopes=['https://www.googleapis.com/auth/spreadsheets']
-        )
-        service = build('sheets', 'v4', credentials=creds)
-        log.info("📊 Google Sheets API connected successfully")
-        return service
-    except Exception as e:
-        log.error(f"❌ Failed to connect to Google Sheets: {str(e)}")
-        raise
 
 # Replace the direct configuration with cached versions
 try:
     model = get_gemini_model()
     service = get_sheets_service()
-    SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
+    SHEET_ID: str | None = os.getenv('GOOGLE_SHEET_ID')
+    log.info("📊 Google Sheets API connected successfully")
 except Exception as e:
+    log.error(f"❌ Failed to connect to Google Sheets: {str(e)}")
     log.error(f"❌ Failed to initialize services: {str(e)}")
     sys.exit(1)
 
 
 @st.cache_data(ttl=300)
-def get_categories():
+def get_categories() -> dict[str, dict[str, list[str]]]:
     """Cache the categories dictionary to prevent reloading"""
     return CATEGORIES
 
 @st.cache_data
-def get_transaction_types():
+def get_transaction_types() -> list[str]:
     """Cache the transaction types to prevent reloading"""
     return TRANSACTION_TYPES
 
-def init_session_state():
-    """Initialize session state variables"""
-    defaults = {
+def init_session_state() -> None:
+    """
+    Initialize Streamlit session state variables with default values.
+    Sets up necessary state variables for the application.
+    """
+    defaults: dict[str, Any] = {
         'messages': [],
         'save_clicked': False,
         'current_amount': None,
@@ -99,41 +79,43 @@ def init_session_state():
         if key not in st.session_state:
             st.session_state[key] = value
 
-def parse_date_from_text(text):
-    try:
-        # Convert text to lowercase for easier matching
-        text = text.lower()
-        current_date = datetime.now()
+def parse_date_from_text(text: str) -> datetime:
+    """
+    Extract and parse date from input text.
+    
+    Args:
+        text (str): Input text containing date information
         
-        # Handle relative dates
-        relative_dates = {
+    Returns:
+        str: Parsed date in YYYY-MM-DD format
+    """
+    current_date: datetime = datetime.now()
+    try:
+        text = text.lower()
+        
+        relative_dates: dict[str, datetime] = {
             'today': current_date,
             'yesterday': current_date - timedelta(days=1),
             'tomorrow': current_date + timedelta(days=1),
             'day before yesterday': current_date - timedelta(days=2),
-            'day after tomorrow': current_date + timedelta(days=2)
         }
-        
-        # Check for relative date references
+
         for phrase, date in relative_dates.items():
             if phrase in text:
                 return date
-        
-        # Handle "last X days/weeks/months" patterns
-        last_pattern = r'last (\d+) (day|week|month)s?'
-        match = re.search(last_pattern, text)
+
+        last_pattern: str = r'last (\d+) (day|week|month)s?'
+        match: re.Match[str] | None = re.search(last_pattern, text)
         if match:
-            number = int(match.group(1))
-            unit = match.group(2)
+            number: int = int(match.group(1))
+            unit: str | Any = match.group(2)
             if unit == 'day':
                 return current_date - timedelta(days=number)
             elif unit == 'week':
                 return current_date - timedelta(weeks=number)
             elif unit == 'month':
-                # Approximate month as 30 days
                 return current_date - timedelta(days=number * 30)
-        
-        # Handle "next X days/weeks/months" patterns
+
         next_pattern = r'next (\d+) (day|week|month)s?'
         match = re.search(next_pattern, text)
         if match:
@@ -144,38 +126,38 @@ def parse_date_from_text(text):
             elif unit == 'week':
                 return current_date + timedelta(weeks=number)
             elif unit == 'month':
-                # Approximate month as 30 days
                 return current_date + timedelta(days=number * 30)
-        
-        # Try to find and parse explicit dates
-        # First, look for common date patterns
+
         date_pattern = r'\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}[-/]\d{1,2}[-/]\d{1,2}'
         match = re.search(date_pattern, text)
         if match:
             return parser.parse(match.group())
-        
-        # If no explicit date pattern, try general date parsing
-        words = text.split()
-        for i in range(len(words)-2):  # Look for 3-word combinations that might be dates
-            possible_date = ' '.join(words[i:i+3])
+        words: list[str] = text.split()
+        for i in range(len(words)-2):
+            possible_date: str = ' '.join(words[i:i+3])
             try:
                 return parser.parse(possible_date)
             except Exception as e:
                 log.error(f"❌ Failed to parse date from text: {str(e)}")
                 continue
         
-        # If no date is found, return current date
         return current_date
     
     except Exception as e:
         log.warning(f"Failed to parse date from text, using current date. Error: {str(e)}")
         return current_date
 
-def test_sheet_access():
+def test_sheet_access() -> bool:
+    """
+    Test Google Sheets API connection.
+    
+    Returns:
+        bool: True if connection successful, False otherwise
+    """
     try:
         # Test write access by appending to the last row instead of clearing
-        test_values = [['TEST', 'TEST', 'TEST', 'TEST', 'TEST', 'TEST']]
-        result = service.spreadsheets().values().append(
+        test_values: list[list[str]] = [['TEST', 'TEST', 'TEST', 'TEST', 'TEST', 'TEST']]
+        result: Any = service.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
             range='Expenses',
             valueInputOption='RAW',
@@ -183,7 +165,7 @@ def test_sheet_access():
         ).execute()
         
         # Get the range that was just written
-        updated_range = result['updates']['updatedRange']
+        updated_range:str = result['updates']['updatedRange']
         
         # Only clear the test row we just added
         service.spreadsheets().values().clear(
@@ -198,17 +180,17 @@ def test_sheet_access():
         log.error(f"❌ Sheet access test failed: {str(e)}")
         return False
 
-def initialize_sheet():
+def initialize_sheet() -> None:
     try:
         # Create sheets if they don't exist
-        sheet_metadata = service.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
-        sheets = sheet_metadata.get('sheets', '')
-        existing_sheets = {s.get("properties", {}).get("title") for s in sheets}
+        sheet_metadata: Any = service.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
+        sheets: list[Any] = sheet_metadata.get('sheets', '')
+        existing_sheets: set[Any] = {s.get("properties", {}).get("title") for s in sheets}
         
         # Initialize Expenses sheet
         if 'Expenses' not in existing_sheets:
             log.info("Creating new Expenses sheet...")
-            body = {
+            body: dict[str, Any] = {
                 'requests': [{
                     'addSheet': {
                         'properties': {
@@ -222,7 +204,7 @@ def initialize_sheet():
                 body=body
             ).execute()
             
-            headers = [['Date', 'Amount', 'Type', 'Category', 'Subcategory', 'Description']]
+            headers: list[list[str]] = [['Date', 'Amount', 'Type', 'Category', 'Subcategory', 'Description']]
             service.spreadsheets().values().update(
                 spreadsheetId=SHEET_ID,
                 range='Expenses!A1:F1',
@@ -233,7 +215,7 @@ def initialize_sheet():
         # Initialize Pending sheet
         if 'Pending' not in existing_sheets:
             log.info("Creating new Pending sheet...")
-            body = {
+            body: dict[str, Any] = {
                 'requests': [{
                     'addSheet': {
                         'properties': {
@@ -247,7 +229,7 @@ def initialize_sheet():
                 body=body
             ).execute()
             
-            headers = [['Date', 'Amount', 'Type', 'Category', 'Description', 'Due Date', 'Status']]
+            headers: list[list[str]] = [['Date', 'Amount', 'Type', 'Category', 'Description', 'Due Date', 'Status']]
             service.spreadsheets().values().update(
                 spreadsheetId=SHEET_ID,
                 range='Pending!A1:G1',
@@ -264,22 +246,36 @@ def initialize_sheet():
         log.error(f"❌ Failed to initialize sheets: {str(e)}")
         raise
 
-def add_transaction_to_sheet(date, amount, trans_type, category, subcategory, description):
+def add_transaction_to_sheet(date: str, amount: float, trans_type: str, 
+                           category: str, subcategory: str, description: str) -> bool:
+    """
+    Add a new transaction to Google Sheet.
+    
+    Args:
+        date (str): Transaction date in YYYY-MM-DD format
+        amount (float): Transaction amount
+        trans_type (str): Type of transaction (Income/Expense)
+        category (str): Transaction category
+        subcategory (str): Transaction subcategory
+        description (str): Transaction description
+        
+    Returns:
+        bool: True if transaction added successfully, False otherwise
+    """
     try:
         log.info(f"Starting transaction save: {date}, {amount}, {trans_type}, {category}, {subcategory}, {description}")
         
         # Format the date if it's a datetime object
-        if isinstance(date, datetime):
-            date = date.strftime('%Y-%m-%d')
+        date_str:Any = date
         
         # Ensure amount is a string
-        amount = str(float(amount))
+        amount_str: str = str(float(amount))
         
         # Prepare the values
-        values = [[str(date), amount, trans_type, category, subcategory, description]]
+        values: list[list[str]] = [[str(date_str), amount_str, trans_type, category, subcategory, description]]
         
         # Changed range to 'Expenses' to let Google Sheets determine the next empty row
-        result = service.spreadsheets().values().append(
+        result: Any = service.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
             range='Expenses',  # Changed from 'Expenses!A2:F2' to just 'Expenses'
             valueInputOption='USER_ENTERED',
@@ -294,16 +290,22 @@ def add_transaction_to_sheet(date, amount, trans_type, category, subcategory, de
         log.error(f"❌ Failed to save transaction: {str(e)}")
         return False
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_transactions_data():
+@st.cache_data(ttl=300)  
+def get_transactions_data() -> pd.DataFrame:
+    """
+    Fetch and process all transactions from Google Sheet.
+    
+    Returns:
+        pd.DataFrame: Processed transactions data
+    """
     try:
         log.debug("Fetching transactions data from Google Sheets")
-        result = service.spreadsheets().values().get(
+        result: Any = service.spreadsheets().values().get(
             spreadsheetId=SHEET_ID,
             range='Expenses!A1:F'
         ).execute()
         
-        values = result.get('values', [])
+        values: list[list[str]] = result.get('values', [])
         if not values:
             log.warning("No transaction data found in sheet")
             return pd.DataFrame(columns=['Date', 'Amount', 'Type', 'Category', 'Subcategory', 'Description'])
@@ -314,75 +316,376 @@ def get_transactions_data():
         log.error(f"❌ Failed to fetch transactions data: {str(e)}")
         raise
 
-def process_user_input(user_input):
+def validate_amount(amount_str: str) -> float:
+    """
+    Validate and convert amount string to float.
+    
+    Args:
+        amount_str: String representation of amount
+        
+    Returns:
+        float: Validated amount
+        
+    Raises:
+        ValueError: If amount is invalid
+    """
     try:
-        log.debug(f"Processing user input: {user_input}")
+        amount = float(amount_str)
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+        return amount
+    except ValueError as e:
+        log.error(f"❌ Invalid amount: {amount_str}")
+        raise ValueError(f"Invalid amount: {amount_str}") from e
+
+def classify_transaction_type(text: str, model: Any) -> dict[str, Any]:
+    """
+    Use Gemini to classify the type of transaction.
+    """
+    try:
+        log.info("🔍 Starting transaction classification")
+        log.debug(f"Input text: {text}")
+        
         chat = model.start_chat(history=[])
-        
-        # Create a more detailed prompt with category hints
         prompt = f"""
-        Extract transaction information from this text: '{user_input}'
+        Classify this transaction: '{text}'
         
-        If the text indicates a future receipt (e.g., "will receive", "getting", "coming", "pending", "next week", "tomorrow"), 
-        classify it as a pending transaction with type "To Receive".
+        VERY IMPORTANT CLASSIFICATION RULES:
+        1. If text contains "received pending" or "got pending" or "collected pending":
+           -> MUST classify as PENDING_RECEIVED
+           Example: "received pending money of 1275" -> PENDING_RECEIVED
+           Example: "got pending payment of 500" -> PENDING_RECEIVED
         
-        If the text indicates a future payment (e.g., "need to pay", "will pay", "have to give", "due"), 
-        classify it as a pending transaction with type "To Pay".
+        2. If text indicates future receipt WITHOUT "pending":
+           -> classify as PENDING_TO_RECEIVE
+           Example: "will receive 1000 next week" -> PENDING_TO_RECEIVE
         
-        For immediate transactions:
-        - If it mentions receiving money now -> use 'Income' type
-        - If it mentions spending money now -> use 'Expense' type
+        3. If text indicates future payment:
+           -> classify as PENDING_TO_PAY
+           Example: "need to pay 500 tomorrow" -> PENDING_TO_PAY
         
-        Always convert relative dates to YYYY-MM-DD format:
-        - "next week" -> date 7 days from today
-        - "tomorrow" -> date 1 day from today
-        - "next month" -> date 30 days from today
+        4. If text indicates immediate expense:
+           -> classify as EXPENSE_NORMAL
+           Example: "spent 100 on food" -> EXPENSE_NORMAL
         
-        Respond in this format only without any quotes:
-        type: Income/Expense/To Receive/To Pay
-        amount: <number>
-        category: <category>
+        5. If text indicates immediate income WITHOUT "pending":
+           -> classify as INCOME_NORMAL
+           Example: "got salary 5000" -> INCOME_NORMAL
+        
+        IMPORTANT: For any text containing "received pending", "got pending", or "collected pending",
+        you MUST classify it as PENDING_RECEIVED, regardless of other words in the text.
+        
+        Respond in this format ONLY:
+        type: <PENDING_RECEIVED/PENDING_TO_RECEIVE/PENDING_TO_PAY/EXPENSE_NORMAL/INCOME_NORMAL>
+        amount: <positive number only>
         description: <brief description>
-        due_date: <YYYY-MM-DD format>
         """
         
+        log.debug("🤖 Sending classification prompt to Gemini")
         response = chat.send_message(prompt)
+        lines = response.text.strip().split('\n')
+        result: dict[str, Any] = {}
         
-        response_text = response.text
-        lines = response_text.strip().split('\n')
-        extracted_info = {}
+        for line in lines:
+            if ':' in line:
+                key, value = line.split(':', 1)
+                result[key.strip()] = value.strip()
+        
+        # Double-check classification for pending received
+        text_lower = text.lower()
+        if any(phrase in text_lower for phrase in ['received pending', 'got pending', 'collected pending']):
+            if result.get('type') != 'PENDING_RECEIVED':
+                log.warning(f"⚠️ Correcting misclassified pending received transaction: {result.get('type')} -> PENDING_RECEIVED")
+                result['type'] = 'PENDING_RECEIVED'
+        
+        # Validate required fields
+        required_fields = ['type', 'amount', 'description']
+        missing_fields = [field for field in required_fields if field not in result]
+        if missing_fields:
+            raise ValueError(f"Missing required fields: {', '.join(missing_fields)}")
+            
+        # Validate transaction type
+        valid_types = ['EXPENSE_NORMAL', 'INCOME_NORMAL', 'PENDING_TO_RECEIVE', 
+                      'PENDING_TO_PAY', 'PENDING_RECEIVED', 'PENDING_PAID']
+        if result['type'] not in valid_types:
+            raise ValueError(f"Invalid transaction type: {result['type']}")
+            
+        # Validate amount
+        result['amount'] = str(validate_amount(result['amount']))
+        
+        log.info(f"📋 Transaction classified as: {result.get('type', 'UNKNOWN')}")
+        log.debug(f"Classification details: {result}")
+        return result
+    except Exception as e:
+        log.error(f"❌ Failed to classify transaction: {str(e)}")
+        raise
+
+def handle_received_pending_transaction(amount: float, description: str) -> tuple[bool, dict[str, Any] | None]:
+    """
+    Handle a pending transaction that has been received.
+    """
+    try:
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+            
+        log.info(f"💫 Processing received pending transaction: amount={amount}")
+        
+        # First check if this transaction was already processed today
+        log.debug("Checking for existing received transactions today")
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID,
+            range='Expenses!A:F'
+        ).execute()
+        
+        values = result.get('values', [])
+        if values and len(values) > 1:  # Check if we have data beyond header
+            for row in values[1:]:  # Skip header
+                if (len(row) >= 6 and 
+                    row[0] == today and 
+                    abs(float(row[1]) - amount) < 0.01 and
+                    row[2] == 'Income' and
+                    row[3] == 'Other' and
+                    row[4] == 'Pending Received' and
+                    'received pending' in row[5].lower()):
+                    log.warning("⚠️ This pending transaction was already processed today")
+                    return False, None
+        
+        # Now check pending transactions
+        log.debug("Searching for matching pending transaction")
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID,
+            range='Pending!A:G'
+        ).execute()
+        
+        values = result.get('values', [])
+        if not values:
+            log.warning("❗ No pending transactions found in sheet")
+            return False, None
+            
+        # Skip header row and find matching pending transaction
+        matching_rows: list[int] = []
+        
+        # Validate sheet structure
+        if len(values[0]) < 7:
+            log.error("❌ Invalid sheet structure: missing required columns")
+            return False, None
+            
+        # Start from index 1 to skip header row
+        for i, row in enumerate(values[1:], start=1):
+            try:
+                if len(row) < 7:
+                    log.warning(f"⚠️ Skipping row {i+1}: insufficient columns")
+                    continue
+                    
+                row_amount = float(row[1])
+                if (abs(row_amount - amount) < 0.01 and  # Use small epsilon for float comparison
+                    row[6] == 'Pending' and 
+                    row[2] == 'To Receive'):
+                    matching_rows.append(i)
+                    log.debug(f"Found potential match at row {i+1}: amount={row_amount}")
+            except (ValueError, IndexError) as e:
+                log.warning(f"⚠️ Error processing row {i+1}: {str(e)}")
+                continue
+        
+        if len(matching_rows) > 1:
+            log.warning(f"⚠️ Multiple matching pending transactions found for amount {amount}")
+            # Use the most recent transaction if multiple matches
+            row_index: int = matching_rows[-1]
+            log.info(f"Selected most recent match at row {row_index+1}")
+        elif len(matching_rows) == 1:
+            row_index = matching_rows[0]
+            log.info(f"✅ Found matching pending transaction at row {row_index+1}")
+        else:
+            log.warning(f"❗ No matching pending transaction found for amount {amount}")
+            return False, None
+            
+        # Update status to Received
+        log.debug(f"Updating status to Received for row {row_index+1}")
+        range_name = f'Pending!G{row_index + 1}'
+        try:
+            service.spreadsheets().values().update(
+                spreadsheetId=SHEET_ID,
+                range=range_name,
+                valueInputOption='RAW',
+                body={'values': [['Received']]}
+            ).execute()
+        except Exception as e:
+            log.error(f"❌ Failed to update pending transaction status: {str(e)}")
+            return False, None
+        
+        # Get original transaction details
+        original_row = values[row_index]
+        original_date = original_row[0]
+        original_description = original_row[4] if len(original_row) > 4 else ''
+        
+        # Create transaction info
+        transaction_info = {
+            'type': 'Income',
+            'amount': str(amount),
+            'category': 'Other',
+            'subcategory': 'Pending Received',
+            'description': f"Received pending payment ({original_date}): {original_description}",
+            'date': today
+        }
+        
+        # Add as new Income transaction
+        log.debug("Creating new Income transaction")
+        success = add_transaction_to_sheet(
+            transaction_info['date'],
+            amount,
+            transaction_info['type'],
+            transaction_info['category'],
+            transaction_info['subcategory'],
+            transaction_info['description']
+        )
+        
+        if success:
+            log.info("✨ Successfully processed received pending transaction")
+        else:
+            log.error("❌ Failed to create Income transaction")
+        
+        return success, transaction_info if success else None
+        
+    except Exception as e:
+        log.error(f"❌ Failed to handle received pending transaction: {str(e)}")
+        return False, None
+
+def process_user_input(text: str) -> dict[str, Any]:
+    """
+    Process natural language input to extract transaction details.
+    """
+    try:
+        if not text or not text.strip():
+            raise ValueError("Input text cannot be empty")
+            
+        log.info("🎯 Starting transaction processing")
+        log.debug(f"Processing input: {text}")
+        
+        # First, classify the transaction type
+        log.debug("Step 1: Classifying transaction type")
+        classification = classify_transaction_type(text, model)
+        transaction_type = classification.get('type', '')
+        
+        try:
+            amount = float(classification.get('amount', 0))
+            if amount <= 0:
+                raise ValueError("Amount must be positive")
+        except ValueError as e:
+            log.error(f"❌ Invalid amount in classification: {classification.get('amount')}")
+            raise
+        
+        log.info(f"Transaction classified as: {transaction_type}")
+        
+        # Handle each type differently
+        if transaction_type == 'PENDING_RECEIVED':
+            log.info("🔄 Handling received pending transaction")
+            success, transaction_info = handle_received_pending_transaction(amount, text)
+            if success and transaction_info:
+                log.info("✅ Successfully processed received pending transaction")
+                # Mark transaction as auto-processed to skip form
+                transaction_info['auto_processed'] = True
+                return transaction_info
+            else:
+                log.warning("⚠️ Failed to process received pending transaction")
+                raise ValueError("Failed to process received pending transaction")
+        
+        elif transaction_type == 'PENDING_PAID':
+            log.info("💰 Handling paid pending transaction")
+            # TODO: Implement handling paid pending payments
+            raise NotImplementedError("Handling paid pending transactions is not implemented yet")
+            
+        # For other types, get detailed transaction info
+        log.debug("Step 2: Getting detailed transaction info")
+        chat = model.start_chat(history=[])
+        prompt = f"""
+        Extract transaction information from this text: '{text}'
+        Transaction was classified as: {transaction_type}
+        
+        Based on the classification, follow these rules:
+        
+        1. For EXPENSE_NORMAL:
+           -> Set type: "Expense"
+           -> Choose category from: Food/Transportation/Housing/Entertainment/Shopping/Healthcare/Gift/Other
+        
+        2. For INCOME_NORMAL:
+           -> Set type: "Income"
+           -> Choose category from: Salary/Investment/Other
+        
+        3. For PENDING_TO_RECEIVE:
+           -> Set type: "To Receive"
+           -> Set category: "Pending Income"
+        
+        4. For PENDING_TO_PAY:
+           -> Set type: "To Pay"
+           -> Choose category from: Bills/Debt
+        
+        5. For PENDING_RECEIVED:
+           -> Set type: "Income"
+           -> Set category: "Other"
+           -> Set subcategory: "Pending Received"
+        
+        6. For PENDING_PAID:
+           -> Set type: "Expense"
+           -> Use original pending payment category
+        
+        Respond in this EXACT format (include ALL fields):
+        type: <Income/Expense/To Receive/To Pay>
+        amount: <number only>
+        category: <must match categories listed above>
+        subcategory: <must match valid subcategories>
+        description: <brief description>
+        due_date: <YYYY-MM-DD format, ONLY for To Receive/To Pay>
+        """
+        
+        log.debug("🤖 Sending detail extraction prompt to Gemini")
+        response = chat.send_message(prompt)
+        response_text: str = response.text
+        lines: list[str] = response_text.strip().split('\n')
+        extracted_info: dict[str, Any] = {}
+        
         for line in lines:
             if ':' in line:
                 key, value = line.split(':', 1)
                 extracted_info[key.strip()] = value.strip().replace('"', '').replace("'", "")
         
+        log.debug(f"Extracted transaction details: {extracted_info}")
+        
         # Set current date as transaction date
-        current_date = datetime.now().strftime('%Y-%m-%d')
+        current_date: str = datetime.now().strftime('%Y-%m-%d')
         extracted_info['date'] = current_date
         
         # Handle relative dates in due_date
-        if extracted_info['type'] in ['To Receive', 'To Pay']:
-            if 'due_date' not in extracted_info or not extracted_info['due_date'].strip():
-                # Default to 7 days from now if no date provided
-                due_date = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
+        if extracted_info.get('type') in ['To Receive', 'To Pay']:
+            log.debug("Processing due date for pending transaction")
+            if 'due_date' not in extracted_info or not extracted_info.get('due_date', '').strip():
+                due_date: str = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
                 extracted_info['due_date'] = due_date
+                log.debug(f"No due date provided, defaulting to: {due_date}")
             else:
                 try:
-                    # Try to parse the date string
-                    parsed_date = parser.parse(extracted_info['due_date'])
+                    parsed_date: datetime = parser.parse(str(extracted_info.get('due_date', '')))
                     extracted_info['due_date'] = parsed_date.strftime('%Y-%m-%d')
+                    log.debug(f"Parsed due date: {extracted_info['due_date']}")
                 except:
-                    # If parsing fails, default to 7 days
                     due_date = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
                     extracted_info['due_date'] = due_date
+                    log.warning(f"Failed to parse due date, defaulting to: {due_date}")
         
-        log.info(f"🎯 Successfully extracted transaction info: {extracted_info}")
+        log.info("✅ Successfully processed transaction")
+        log.debug(f"Final transaction info: {extracted_info}")
         return extracted_info
+        
     except Exception as e:
-        log.error(f"❌ Failed to process user input: {str(e)}")
+        log.error(f"❌ Failed to process user input: {str(e)}", exc_info=True)
         raise
 
-def show_analytics():
+def show_analytics() -> None:
+    """
+    Display analytics dashboard with transaction visualizations.
+    Shows pie charts and trends for income and expenses.
+    """
     try:
         log.info("Generating financial analytics")
         df = get_transactions_data()
@@ -391,12 +694,12 @@ def show_analytics():
             st.info("No transactions recorded yet. Add some transactions to see analytics!")
             return
             
-        df['Amount'] = pd.to_numeric(df['Amount'])
-        df['Date'] = pd.to_datetime(df['Date'])
+        df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce') # type: ignore
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce') # type: ignore
         
         # Calculate totals
-        total_income = df[df['Type'] == 'Income']['Amount'].sum()
-        total_expenses = df[df['Type'] == 'Expense']['Amount'].sum()
+        total_income = df[df['Type'] == 'Income']['Amount'].sum() # type: ignore 
+        total_expenses = df[df['Type'] == 'Expense']['Amount'].sum() # type: ignore
         net_balance = total_income - total_expenses
         
         # Display metrics
@@ -412,11 +715,11 @@ def show_analytics():
         
         if len(df) > 1:  # Only show charts if we have more than one transaction
             # Income vs Expenses over time
-            df_grouped = df.groupby(['Date', 'Type'])['Amount'].sum().unstack(fill_value=0)
-            fig_timeline = px.line(df_grouped, 
+            df_grouped = df.groupby(['Date', 'Type'])['Amount'].sum().unstack(fill_value=0) # type: ignore
+            fig_timeline = px.line(df_grouped,  # type: ignore
                                  title='Income vs Expenses Over Time',
                                  labels={'value': 'Amount (Rs. )', 'variable': 'Type'})
-            st.plotly_chart(fig_timeline)
+            st.plotly_chart(fig_timeline) # type: ignore
             
             # Category breakdown for both income and expenses
             col1, col2 = st.columns(2)
@@ -425,9 +728,9 @@ def show_analytics():
                 st.subheader("Income Breakdown")
                 income_df = df[df['Type'] == 'Income']
                 if not income_df.empty:
-                    fig_income = px.pie(income_df, values='Amount', names='Category', 
+                    fig_income = px.pie(income_df, values='Amount', names='Category',  # type: ignore
                                       title='Income by Category')
-                    st.plotly_chart(fig_income)
+                    st.plotly_chart(fig_income) # type: ignore
                 else:
                     st.info("No income transactions recorded yet.")
             
@@ -435,40 +738,40 @@ def show_analytics():
                 st.subheader("Expense Breakdown")
                 expense_df = df[df['Type'] == 'Expense']
                 if not expense_df.empty:
-                    fig_expense = px.pie(expense_df, values='Amount', names='Category', 
+                    fig_expense = px.pie(expense_df, values='Amount', names='Category',  # type: ignore
                                        title='Expenses by Category')
-                    st.plotly_chart(fig_expense)
+                    st.plotly_chart(fig_expense) # type: ignore
                 else:
                     st.info("No expense transactions recorded yet.")
             
             # Monthly summary
             st.subheader("Monthly Summary")
-            monthly_summary = df.groupby([df['Date'].dt.strftime('%Y-%m'), 'Type'])['Amount'].sum().unstack(fill_value=0)
-            monthly_summary['Net'] = monthly_summary.get('Income', 0) - monthly_summary.get('Expense', 0)
-            st.dataframe(monthly_summary.style.format("Rs. {:,.2f}"))
+            monthly_summary = df.groupby([df['Date'].dt.strftime('%Y-%m'), 'Type'])['Amount'].sum().unstack(fill_value=0) # type: ignore
+            monthly_summary['Net'] = monthly_summary.get('Income', 0) - monthly_summary.get('Expense', 0) # type: ignore
+            st.dataframe(monthly_summary.style.format("Rs. {:,.2f}")) # type: ignore
         
-        log.info("📊 Analytics visualizations generated successfully")
+        log.info("✅ Analytics visualizations generated successfully")
     except Exception as e:
         log.error(f"❌ Failed to generate analytics: {str(e)}")
         st.error("Failed to generate analytics. Please try again later.")
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def get_sheet_url():
+def get_sheet_url() -> str:
     return f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
 
 @st.cache_resource  # Cache for the entire session
-def initialize_gemini():
-    genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-    return genai.GenerativeModel('gemini-pro')
+def initialize_gemini() -> Any:
+    genai.configure(api_key=os.getenv('GEMINI_API_KEY')) # type: ignore
+    return genai.GenerativeModel('gemini-1.5-flash') # type: ignore
 
 @st.cache_data
-def get_subcategories(trans_type, category):
+def get_subcategories(trans_type: str, category: str) -> list[str]:
     return CATEGORIES[trans_type][category]
 
 def on_save_click():
     st.session_state.save_clicked = True
 
-def verify_sheet_setup():
+def verify_sheet_setup() -> bool:
     try:
         result = service.spreadsheets().values().get(
             spreadsheetId=SHEET_ID,
@@ -494,8 +797,14 @@ def verify_sheet_setup():
         log.error(f"Failed to verify sheet setup: {str(e)}")
         return False
 
-def show_success_message(transaction_date, subcategory):
-    """Display success message after transaction is saved"""
+def show_success_message(transaction_date: datetime | str, subcategory: str | None) -> None:
+    """
+    Display success message after transaction is saved.
+    
+    Args:
+        transaction_date: Date of the transaction
+        subcategory: Transaction subcategory, if applicable
+    """
     emoji = "💰" if st.session_state.current_transaction['type'] == "Income" else "💸"
     confirmation_message = (
         f"{emoji} Transaction recorded:\n\n"
@@ -503,7 +812,7 @@ def show_success_message(transaction_date, subcategory):
         f"Amount: Rs. {float(st.session_state.current_transaction['amount']):,.2f}\n"
         f"Type: {st.session_state.current_transaction['type']}\n"
         f"Category: {st.session_state.current_transaction['category']}\n"
-        f"Subcategory: {subcategory}"
+        f"Subcategory: {subcategory if subcategory else 'N/A'}"
     )
     st.success(confirmation_message)
     st.session_state.messages.append({"role": "assistant", "content": confirmation_message})
@@ -512,6 +821,36 @@ def show_success_message(transaction_date, subcategory):
 def show_transaction_form():
     """Separate function to handle transaction form display and processing"""
     extracted_info = st.session_state.current_transaction
+    
+    # Skip form for auto-processed transactions (like received pending)
+    if extracted_info.get('auto_processed'):
+        log.debug("Showing feedback for auto-processed transaction")
+        
+        # Show detailed success message
+        st.success("✅ Transaction Processed Successfully")
+        
+        # Create columns for better layout
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Transaction Details:**")
+            st.write(f"📅 Date: {extracted_info.get('date')}")
+            st.write(f"💰 Amount: Rs. {float(extracted_info.get('amount', 0)):,.2f}")
+            st.write(f"📝 Type: {extracted_info.get('type')}")
+            
+        with col2:
+            st.write(f"🏷️ Category: {extracted_info.get('category')}")
+            st.write(f"📑 Subcategory: {extracted_info.get('subcategory')}")
+            st.write(f"📌 Description: {extracted_info.get('description')}")
+            
+        # Add a divider for visual separation
+        st.divider()
+        
+        # Add a clear button
+        if st.button("Clear Message", key="clear_feedback"):
+            st.session_state.current_transaction = None
+            st.rerun()
+        return
     
     if 'amount' in extracted_info and 'type' in extracted_info:
         # Create form container
@@ -573,16 +912,16 @@ def show_transaction_form():
                 try:
                     if extracted_info['type'] in ['To Receive', 'To Pay']:
                         success = add_pending_transaction_to_sheet(
-                            transaction_date,
+                            transaction_date.strftime('%Y-%m-%d'),  # Convert to string
                             extracted_info['amount'],
                             extracted_info['type'],
                             extracted_info['category'],
                             extracted_info.get('description', ''),
-                            due_date
+                            due_date.strftime('%Y-%m-%d')  # Convert to string
                         )
                     else:
                         success = add_transaction_to_sheet(
-                            transaction_date,
+                            transaction_date.strftime('%Y-%m-%d'),  # Convert to string
                             extracted_info['amount'],
                             extracted_info['type'],
                             extracted_info['category'],
@@ -591,7 +930,10 @@ def show_transaction_form():
                         )
                     
                     if success:
-                        show_success_message(transaction_date, subcategory if 'subcategory' in locals() else None)
+                        show_success_message(
+                            transaction_date.strftime('%Y-%m-%d'),  # Convert to string
+                            subcategory if 'subcategory' in locals() else None
+                        )
                         st.session_state.current_transaction = None
                         st.session_state.form_submitted = False
                         st.rerun()
@@ -703,6 +1045,10 @@ def verify_sheets_setup():
         return False
 
 def main():
+    """
+    Main application function.
+    Handles the core application flow and user interface.
+    """
     try:
         log.info("🚀 Starting Finance Tracker application")
         

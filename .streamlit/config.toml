@@ -17,14 +17,6 @@ base = "light"
 [global]
 developmentMode = false
 
-[layout]
-showSidebarNavigation = true
-centerWidgets = false
-
 [client]
-caching = true
-displayEnabled = true
 showErrorDetails = true
 toolbarMode = "auto"
-layout = "wide" 
-showSidebar = true
