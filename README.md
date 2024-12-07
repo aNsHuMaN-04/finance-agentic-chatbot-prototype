@@ -24,7 +24,7 @@ A modern, AI-powered expense tracking application built with Streamlit that help
 
 1. Clone the repository:
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/Spritan/expense_tracker
 cd expense_tracker
 ```
 
