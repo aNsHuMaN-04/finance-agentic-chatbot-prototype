@@ -17,8 +17,12 @@ from utils.logging_utils import setup_logging
 log: Logger = setup_logging("expense_tracker")
 
 # Load environment variables
-load_dotenv()
+load_dotenv(dotenv_path='D:/Chatbot_Hackathon/expense_tracker_chatbot/.env')
 log.info("✨ Environment variables loaded")
+log.info(f"GEMINI_API_KEY: {os.getenv('GEMINI_API_KEY')}")
+log.info(f"GOOGLE_SHEETS_CRED_PATH: {os.getenv('GOOGLE_SHEETS_CRED_PATH')}")
+log.info(f"GOOGLE_SHEET_ID: {os.getenv('GOOGLE_SHEET_ID')}")
+
 
 st.set_page_config (layout='wide')
 
