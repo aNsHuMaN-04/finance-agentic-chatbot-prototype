@@ -1,12 +1,14 @@
-# Python-generated files
+# Python virtual environment
+venv/
 __pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+*.pyc
 
-# Virtual environments
-.venv
-/rugged-choir-398914-e074525cfd1e.json
-/.env
+# dotenv file
+.env
+
+# Google service account credentials
+creds.json
+
+# Streamlit and other cache
+.streamlit/
+.cache/
